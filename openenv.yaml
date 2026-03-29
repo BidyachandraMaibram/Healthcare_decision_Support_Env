@@ -1,0 +1,81 @@
+name: medical_decision_support
+version: "1.0.0"
+description: >
+  An OpenEnv environment for evaluating AI agents on clinical decision-making tasks.
+  Covers allergy safety checks, dose recommendations, and multi-condition treatment planning.
+
+author: "your-hf-username"
+license: "MIT"
+
+# Endpoints (all served by FastAPI app)
+endpoints:
+  reset:   POST /reset
+  step:    POST /step
+  state:   GET  /state
+  health:  GET  /health
+  tasks:   GET  /tasks
+  grader:  POST /grader
+  baseline: POST /baseline
+
+# Tasks
+tasks:
+  - name: allergy_check
+    difficulty: easy
+    description: >
+      Given a patient's allergy profile and a proposed drug, identify all conflicts
+      (direct and cross-reactions). Score 0.0–1.0.
+
+  - name: dosing
+    difficulty: medium
+    description: >
+      Recommend a safe dose for a given drug adjusted for the patient's weight,
+      renal function, age, and comorbidities. Score 0.0–1.0 with partial credit.
+
+  - name: treatment_plan
+    difficulty: hard
+    description: >
+      Develop a complete, safe treatment plan for a patient with 2-3 comorbidities.
+      Must avoid drug-drug interactions and allergy conflicts. Score 0.0–1.0.
+
+# Observation space
+observation:
+  type: structured
+  fields:
+    info_state:
+      type: array[float]
+      length: 28
+      description: "Flat encoded patient vector for RL agents"
+    patient:
+      type: dict
+      description: "Human-readable patient profile (no ground truth)"
+    task:
+      type: string
+      description: "Active task name"
+    legal_actions:
+      type: array[string]
+      description: "Valid action_type values for current episode"
+    feedback:
+      type: string
+      description: "Text feedback from last action"
+    done:
+      type: boolean
+    reward:
+      type: float
+      range: [0.0, 1.0]
+
+# Action space
+action:
+  type: structured
+  fields:
+    action_type:
+      type: string
+      enum: [flag_allergy, recommend_dose, finalize_treatment_plan]
+    payload:
+      type: dict
+      description: "Task-specific payload (see /tasks endpoint for schema)"
+
+# Baseline scores (from /baseline endpoint)
+baseline_scores:
+  allergy_check:   0.875
+  dosing:          0.667
+  treatment_plan:  0.500
