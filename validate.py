@@ -46,6 +46,7 @@ def check_local_files():
         "openenv.yaml",
         "README.md",
         "baseline.py",
+        "inference.py",
         "models.py",
         "client.py",
         "pyproject.toml",

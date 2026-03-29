@@ -228,3 +228,18 @@ def baseline():
 
     all_s = t1 + t2 + t3
     return {"baseline_scores": scores, "overall_mean": round(sum(all_s)/len(all_s), 3)}
+
+
+def main():
+    """Entry point for openenv server startup."""
+    import uvicorn
+    uvicorn.run(
+        "server.app:app",
+        host="0.0.0.0",
+        port=7860,
+        reload=False,
+    )
+
+
+if __name__ == "__main__":
+    main()

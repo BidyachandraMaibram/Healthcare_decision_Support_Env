@@ -2,7 +2,7 @@
 title: Healthcare Decision Support Environment
 emoji: 🏥
 colorFrom: blue
-colorTo: green
+colorTo: teal
 sdk: docker
 pinned: false
 tags:
