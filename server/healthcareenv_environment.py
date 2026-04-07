@@ -101,7 +101,7 @@ class HealthcareEnvironment:
         if action.action_type not in allowed:
             return self._build_observation(
                 done     = False,
-                reward   = 0.0,
+                reward   = 0.01,
                 feedback = (
                     f"Invalid action '{action.action_type}' for task "
                     f"'{self._patient['task']}'. Allowed: {allowed}"

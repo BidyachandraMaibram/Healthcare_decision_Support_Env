@@ -2,19 +2,24 @@
 Healthcare Decision Support Environment — Graders
 
 Three deterministic graders, one per task.
-Each returns a score in [0.0, 1.0] with partial credit.
+Each returns a score strictly in (0.0, 1.0) — exclusive on both ends.
 Scores VARY based on answer quality — no fixed/constant return values.
 """
 from typing import Dict, Any
+
+
+def _clamp(score: float) -> float:
+    """Clamp score to strictly (0, 1) — validator rejects 0.0 and 1.0."""
+    return round(min(max(score, 0.01), 0.99), 3)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Task 1 — Allergy Safety Check  (easy)
 #
 # Scoring:
-#   1.0  — correctly identifies ALL conflicts (or correctly says none)
+#   0.99 — correctly identifies ALL conflicts (or correctly says none)
 #   0.5  — finds the direct conflict but misses cross-reactions
-#   0.0  — misses the conflict entirely OR falsely flags a safe drug
+#   0.01 — misses the conflict entirely OR falsely flags a safe drug
 # ─────────────────────────────────────────────────────────────────────────────
 
 def grade_allergy_check(patient: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -25,9 +30,9 @@ def grade_allergy_check(patient: Dict[str, Any], payload: Dict[str, Any]) -> Dic
     # Case: no conflict expected
     if not correct:
         if not flagged:
-            return {"score": 1.0, "max_score": 1.0,
+            return {"score": _clamp(1.0), "max_score": 1.0,
                     "feedback": "Correct — no allergy conflict exists for this patient."}
-        return {"score": 0.0, "max_score": 1.0,
+        return {"score": _clamp(0.0), "max_score": 1.0,
                 "feedback": f"Incorrect — falsely flagged {flagged}. No conflict exists for this patient."}
 
     correct_set = set(correct)
@@ -35,28 +40,22 @@ def grade_allergy_check(patient: Dict[str, Any], payload: Dict[str, Any]) -> Dic
 
     # Full marks: all correct conflicts flagged, no false positives
     if proposed in flagged_set and correct_set <= flagged_set and not (flagged_set - correct_set):
-        return {"score": 1.0, "max_score": 1.0,
+        return {"score": _clamp(1.0), "max_score": 1.0,
                 "feedback": f"Correct — {flagged} flagged. Reason: {patient.get('correct_reason', '')}"}
 
     # Partial: found the direct drug but missed some cross-reactions
     if proposed in flagged_set:
         missed = list(correct_set - flagged_set)
-        return {"score": 0.5, "max_score": 1.0,
+        return {"score": _clamp(0.5), "max_score": 1.0,
                 "feedback": f"Partial — flagged {proposed} but missed cross-reactions: {missed}"}
 
     # No marks: missed the conflict
-    return {"score": 0.0, "max_score": 1.0,
+    return {"score": _clamp(0.0), "max_score": 1.0,
             "feedback": f"Incorrect — {proposed} conflicts with patient allergies but was not flagged."}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Task 2 — Dosing Recommendation  (medium)
-#
-# Four components, each worth 0.25:
-#   [A] Dose is within the safe range for this patient
-#   [B] Frequency matches expected (must be non-empty and correct)
-#   [C] Renal function mentioned when GFR < 60  (free credit if not needed)
-#   [D] Clinical reasoning mentions key factors
 # ─────────────────────────────────────────────────────────────────────────────
 
 def grade_dosing(patient: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -95,7 +94,6 @@ def grade_dosing(patient: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, 
         else:
             parts.append(f"Renal note missing ✗ (GFR={gfr} requires adjustment)")
     else:
-        # Renal not needed — give credit only if reasoning is non-empty
         if reasoning:
             score += 0.25
         else:
@@ -116,18 +114,11 @@ def grade_dosing(patient: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, 
     else:
         parts.append("Reasoning empty ✗")
 
-    return {"score": round(min(score, 1.0), 3), "max_score": 1.0, "feedback": " | ".join(parts)}
+    return {"score": _clamp(score), "max_score": 1.0, "feedback": " | ".join(parts)}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Task 3 — Multi-Condition Treatment Plan  (hard)
-#
-# Five components, each worth 0.2:
-#   [A] Correct drug classes present for each condition
-#   [B] Dangerous / contraindicated drugs avoided
-#   [C] Drug-drug interactions acknowledged
-#   [D] Anticoagulant awareness (if patient is on warfarin)
-#   [E] Reasoning quality — every plan item has a non-trivial explanation
 # ─────────────────────────────────────────────────────────────────────────────
 
 def grade_treatment_plan(patient: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -199,7 +190,7 @@ def grade_treatment_plan(patient: Dict[str, Any], payload: Dict[str, Any]) -> Di
     else:
         score += 0.2
 
-    # [E] Reasoning quality — penalise empty plan items
+    # [E] Reasoning quality
     if plan:
         with_reason = sum(1 for item in plan if len(item.get("reason", "").strip()) > 10)
         score += 0.2 * (with_reason / len(plan))
@@ -207,7 +198,7 @@ def grade_treatment_plan(patient: Dict[str, Any], payload: Dict[str, Any]) -> Di
     else:
         parts.append("Plan is empty ✗")
 
-    return {"score": round(min(score, 1.0), 3), "max_score": 1.0, "feedback": " | ".join(parts)}
+    return {"score": _clamp(score), "max_score": 1.0, "feedback": " | ".join(parts)}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -222,4 +213,4 @@ def run_grader(patient: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, An
         return grade_dosing(patient, payload)
     elif task == "treatment_plan":
         return grade_treatment_plan(patient, payload)
-    return {"score": 0.0, "max_score": 1.0, "feedback": f"Unknown task: {task}"}
+    return {"score": _clamp(0.0), "max_score": 1.0, "feedback": f"Unknown task: {task}"}
