@@ -1,249 +1,301 @@
 """
-Healthcare Decision Support Environment -- Baseline Inference Script
+Healthcare Decision Support Environment — LLM Inference Script
 
-Runs the rule-based baseline agent across all three tasks locally
-and prints reproducible scores. Also supports testing a live HF Space.
+Follows the official OpenEnv submission template exactly.
 
-Usage:
-    python baseline.py                            # run locally
-    python baseline.py --url https://USER-healthcareenv.hf.space
+MANDATORY environment variables:
+    API_BASE_URL     — OpenAI-compatible API endpoint (default provided)
+    MODEL_NAME       — Model identifier (default provided)
+    HF_TOKEN         — Hugging Face / API key (NO default)
+    LOCAL_IMAGE_NAME — Docker image name if using from_docker_image() (optional)
+
+STDOUT FORMAT (exact):
+    [START] task=<name> env=<benchmark> model=<model>
+    [STEP]  step=<n> action=<str> reward=<0.00> done=<true|false> error=<msg|null>
+    [END]   success=<true|false> steps=<n> score=<0.00> rewards=<r1,r2,...>
 """
-import argparse
-import json
-import sys
+
+import asyncio
 import os
+import json
+import textwrap
+from typing import List, Optional
 
-# Windows + Linux compatible path setup
-# Always run relative to this file's directory
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, BASE_DIR)
+from openai import OpenAI
 
-from server.healthcareenv_environment import HealthcareEnvironment
-from server.data import PATIENTS, DRUG_DB, CROSS_REACTIONS
+from client import HealthcareEnv
 from models import MedicalAction
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Environment variables
+# Defaults ONLY for API_BASE_URL and MODEL_NAME — NOT for HF_TOKEN
+# ─────────────────────────────────────────────────────────────────────────────
+
+API_BASE_URL     = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME       = os.getenv("MODEL_NAME",   "Qwen/Qwen2.5-72B-Instruct")
+HF_TOKEN         = os.getenv("HF_TOKEN")
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")   # optional, for from_docker_image()
+
+HF_SPACE_URL = os.getenv("HF_SPACE_URL", "https://Maibram1-Medical.hf.space")
+
+TASKS                   = ["allergy_check", "dosing", "treatment_plan"]
+BENCHMARK               = "healthcare_decision_support"
+MAX_PATIENTS_PER_TASK   = 20      # safety cap; loop breaks on first repeated patient
+SUCCESS_SCORE_THRESHOLD = 0.5
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Baseline policies  (deterministic, rule-based)
+# Structured stdout — exact format required by validator
 # ─────────────────────────────────────────────────────────────────────────────
 
-def policy_allergy(patient):
-    """Flag proposed drug if it directly or cross-reacts with any patient allergy."""
-    proposed    = patient.get("proposed_drug", "")
-    drug_info   = DRUG_DB.get(proposed, {})
-    allergy_cls = drug_info.get("allergy_class")
-    flags, reasons = [], []
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
 
-    for allergy in patient.get("allergies", []):
-        crosses = CROSS_REACTIONS.get(allergy, [])
-        if proposed in crosses:
-            flags.append(proposed)
-            reasons.append("{} cross-reacts with {} allergy".format(proposed, allergy))
-            break
-        if allergy == allergy_cls:
-            flags.append(proposed)
-            reasons.append("{} belongs to {} class -- patient has {} allergy".format(
-                proposed, allergy_cls, allergy))
-            break
 
-    return MedicalAction(
-        action_type="flag_allergy",
-        payload={
-            "flagged_drugs": flags,
-            "reason": "; ".join(reasons) if reasons else "No allergy conflict detected",
-        },
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    error_val = error if error else "null"
+    done_val  = str(done).lower()
+    action_safe = action.replace("\n", " ").replace("\r", "")[:120]
+    print(
+        f"[STEP] step={step} action={action_safe} reward={reward:.2f} done={done_val} error={error_val}",
+        flush=True,
     )
 
 
-def policy_dosing(patient):
-    """Recommend standard dose with renal and paediatric adjustments."""
-    drug      = patient.get("drug_to_dose", "")
-    info      = DRUG_DB.get(drug, {})
-    dose      = float(info.get("standard_dose_mg", 500))
-    frequency = info.get("frequency", "once daily")
-    gfr       = patient.get("labs", {}).get("GFR", 90)
-    age       = patient.get("age", 30)
-    weight    = patient.get("weight_kg", 70)
-    reasons   = ["Standard dose for {}".format(drug)]
-
-    if info.get("renal_reduction"):
-        if gfr < 45:
-            dose   *= 0.5
-            reasons.append("Halved dose -- GFR {} (<45) renal adjustment".format(gfr))
-        elif gfr < 60:
-            dose   *= 0.75
-            reasons.append("Reduced 25% -- GFR {} (45-60) renal adjustment".format(gfr))
-
-    if age < 12:
-        freq_div = 3 if "8" in frequency else 2
-        dose     = (40 * weight) / freq_div
-        reasons.append(
-            "Paediatric dose: 40mg/kg/day divided by {} doses (weight={}kg, age={})".format(
-                freq_div, weight, age))
-
-    return MedicalAction(
-        action_type="recommend_dose",
-        payload={
-            "drug":      drug,
-            "dose_mg":   round(dose, 1),
-            "frequency": frequency,
-            "reasoning": "; ".join(reasons),
-        },
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}",
+        flush=True,
     )
 
 
-def policy_treatment_plan(patient):
-    """Build a safe plan: one first-line drug per condition."""
-    COND_MAP = {
-        "type 2 diabetes":    ("metformin",    500, "First-line oral hypoglycaemic for T2DM"),
-        "hypertension":       ("amlodipine",     5, "Safe CCB -- minimal renal/interaction risk"),
-        "hyperlipidemia":     ("atorvastatin",  20, "Statin first-line for lipid control"),
-        "atrial fibrillation":("amlodipine",     5, "Rate-control CCB; anticoagulation already in place"),
-        "osteoarthritis":     ("acetaminophen", 500, "Safest analgesic given aspirin/NSAID allergy profile"),
-    }
-    plan = []
-    gfr = patient.get("labs", {}).get("GFR", 90)
-    for cond in patient.get("conditions", []):
-        mapping = COND_MAP.get(cond)
-        if not mapping:
-            continue
-        drug, dose, reason = mapping
-        if drug == "metformin" and gfr < 30:
-            continue
-        plan.append({"condition": cond, "drug": drug, "dose_mg": dose, "reason": reason})
+# ─────────────────────────────────────────────────────────────────────────────
+# System prompts
+# ─────────────────────────────────────────────────────────────────────────────
 
-    return MedicalAction(
-        action_type="finalize_treatment_plan",
-        payload={
-            "plan": plan,
-            "drug_interactions_noted": [
-                "warfarin interacts with NSAIDs, aspirin, and amoxicillin",
-                "lisinopril + NSAIDs can reduce antihypertensive effect",
+SYSTEM_PROMPTS = {
+    "allergy_check": textwrap.dedent("""
+        You are a clinical pharmacist AI. Given a patient profile with allergies and a proposed drug,
+        identify ALL allergy conflicts including direct matches AND cross-reactions.
+
+        Known cross-reactions:
+        - penicillin allergy → avoid: amoxicillin, ampicillin, piperacillin
+        - sulfa allergy → avoid: sulfamethoxazole, trimethoprim-sulfamethoxazole
+        - aspirin allergy → avoid: ibuprofen, naproxen, celecoxib (NSAIDs)
+        - cephalosporin allergy → avoid: cefazolin, cephalexin, ceftriaxone
+        - codeine allergy → avoid: morphine, oxycodone, hydrocodone
+
+        Respond ONLY with valid JSON, no markdown, no explanation:
+        {
+          "action_type": "flag_allergy",
+          "payload": {
+            "flagged_drugs": ["drug_name"],
+            "reason": "brief reason including the allergy class and cross-reaction"
+          }
+        }
+        Use empty list if no conflict: "flagged_drugs": []
+    """).strip(),
+
+    "dosing": textwrap.dedent("""
+        You are a clinical pharmacist AI. Given a patient profile and a drug to dose,
+        recommend a safe dose adjusted for weight, age, and renal function (GFR).
+
+        Key dosing rules:
+        - GFR < 45: halve the standard dose (renal adjustment)
+        - GFR 45-60: reduce standard dose by 25%
+        - Age < 12: use pediatric dosing: 40 mg/kg/day divided by frequency
+        - Always explain your reasoning including renal function and age factors
+
+        Respond ONLY with valid JSON, no markdown, no explanation:
+        {
+          "action_type": "recommend_dose",
+          "payload": {
+            "drug": "drug_name",
+            "dose_mg": 500.0,
+            "frequency": "twice daily",
+            "reasoning": "clinical reasoning mentioning GFR, age, weight as relevant"
+          }
+        }
+    """).strip(),
+
+    "treatment_plan": textwrap.dedent("""
+        You are a senior clinical pharmacist AI. Given a patient with multiple conditions,
+        create a complete safe treatment plan avoiding drug interactions and allergy conflicts.
+
+        Guidelines:
+        - Type 2 diabetes → metformin 500mg twice daily (avoid if GFR < 30)
+        - Hypertension → amlodipine 5mg once daily OR lisinopril 10mg once daily
+        - Hyperlipidemia → atorvastatin 20mg once daily
+        - Osteoarthritis (with aspirin/NSAID allergy) → acetaminophen 500mg (NOT ibuprofen/naproxen)
+        - Always note warfarin interactions if patient is on anticoagulant
+        - Avoid drugs the patient is allergic to (direct AND cross-reactions)
+        - Each plan item must have a clear clinical reason (>10 words)
+
+        Respond ONLY with valid JSON, no markdown, no explanation:
+        {
+          "action_type": "finalize_treatment_plan",
+          "payload": {
+            "plan": [
+              {"condition": "condition_name", "drug": "drug_name", "dose_mg": 500, "reason": "detailed clinical reason"}
             ],
-            "drugs_avoided": [
-                "ibuprofen -- NSAID contraindicated with aspirin allergy and CKD",
-                "amoxicillin -- penicillin allergy",
-                "aspirin -- direct patient allergy",
-                "sulfamethoxazole -- sulfa allergy",
-                "naproxen -- NSAID cross-reacts with aspirin allergy",
+            "drug_interactions_noted": ["interaction description"],
+            "drugs_avoided": ["drug_name -- reason why avoided"]
+          }
+        }
+    """).strip(),
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LLM call via OpenAI client
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_llm_action(client: OpenAI, task: str, patient: dict) -> dict:
+    """Call the LLM and return a parsed action dict."""
+    user_content = f"Patient profile:\n{json.dumps(patient, indent=2)}"
+    try:
+        completion = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPTS[task]},
+                {"role": "user",   "content": user_content},
             ],
-        },
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Local runner
-# ─────────────────────────────────────────────────────────────────────────────
-
-def run_local():
-    results = {}
-    task_configs = [
-        ("allergy_check",   policy_allergy),
-        ("dosing",          policy_dosing),
-        ("treatment_plan",  policy_treatment_plan),
-    ]
-
-    for task_name, policy_fn in task_configs:
-        patients = [p for p in PATIENTS if p["task"] == task_name]
-        scores   = []
-
-        # Structured output block required by hackathon Phase 2 validator
-        print("[START] task={}".format(task_name), flush=True)
-
-        for step_idx, patient in enumerate(patients, start=1):
-            env          = HealthcareEnvironment()
-            env._patient = patient
-            env._done    = False
-            action       = policy_fn(patient)
-            obs          = env.step(action)
-            score        = obs.reward or 0.0
-            scores.append(score)
-            feedback_short = obs.feedback[:65] if obs.feedback else ""
-
-            # Required structured step output
-            print("[STEP] step={} reward={:.3f} patient={} task={}".format(
-                step_idx, score, patient["patient_id"], task_name), flush=True)
-
-            print("  [{}]  patient={}  score={:.3f}  ->  {}...".format(
-                task_name, patient["patient_id"], score, feedback_short), flush=True)
-
-        mean = sum(scores) / len(scores) if scores else 0.0
-        results[task_name] = {"mean": round(mean, 3), "n": len(scores), "scores": scores}
-
-        # Required structured end output
-        print("[END] task={} score={:.3f} steps={}".format(
-            task_name, mean, len(scores)), flush=True)
-        print(flush=True)
-
-    return results
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Remote runner
-# ─────────────────────────────────────────────────────────────────────────────
-
-def run_remote(url):
-    import urllib.request
-    base = url.rstrip("/")
-
-    def post(endpoint, data=None):
-        req = urllib.request.Request(
-            "{}/{}".format(base, endpoint),
-            data=json.dumps(data or {}).encode(),
-            headers={"Content-Type": "application/json"},
+            temperature=0.1,
+            max_tokens=600,
+            stream=False,
         )
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return json.loads(r.read())
+        raw = (completion.choices[0].message.content or "").strip()
 
-    def get(endpoint):
-        with urllib.request.urlopen("{}/{}".format(base, endpoint), timeout=15) as r:
-            return json.loads(r.read())
+        # Strip markdown fences if model adds them
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
 
-    print("Pinging {}/health ...".format(base))
-    h = get("health")
-    print("  -> {}\n".format(h))
+        return json.loads(raw)
 
-    print("Checking {}/tasks ...".format(base))
-    t = get("tasks")
-    print("  -> {} tasks: {}\n".format(len(t["tasks"]), [x["name"] for x in t["tasks"]]))
+    except Exception as exc:
+        print(f"[DEBUG] LLM call failed: {exc}", flush=True)
+        return _fallback_action(task, patient)
 
-    print("Running {}/baseline ...".format(base))
-    result = post("baseline")
-    return result
+
+def _fallback_action(task: str, patient: dict) -> dict:
+    """Deterministic rule-based fallback if LLM call fails."""
+    if task == "allergy_check":
+        return {
+            "action_type": "flag_allergy",
+            "payload": {"flagged_drugs": [], "reason": "fallback: no conflict detected"},
+        }
+    elif task == "dosing":
+        return {
+            "action_type": "recommend_dose",
+            "payload": {
+                "drug":      patient.get("drug_to_dose", "unknown"),
+                "dose_mg":   500.0,
+                "frequency": "once daily",
+                "reasoning": "fallback: standard dose, check renal and age adjustments",
+            },
+        }
+    else:
+        return {
+            "action_type": "finalize_treatment_plan",
+            "payload": {
+                "plan": [],
+                "drug_interactions_noted": [],
+                "drugs_avoided": [],
+            },
+        }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Run one task — emits [START] / [STEP]* / [END]
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def run_task(client: OpenAI, base_url: str, task_name: str) -> None:
+    rewards:      List[float] = []
+    steps_taken:  int         = 0
+    success:      bool        = False
+    score:        float       = 0.0
+
+    log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
+
+    env = HealthcareEnv(base_url=base_url).sync()
+    seen_patients: set = set()
+
+    try:
+        for _ in range(MAX_PATIENTS_PER_TASK):
+
+            # Reset for this task
+            try:
+                result = env.reset(task_filter=task_name)
+            except Exception as exc:
+                steps_taken += 1
+                log_step(step=steps_taken, action="reset()", reward=0.0,
+                         done=True, error=str(exc)[:120])
+                rewards.append(0.0)
+                break
+
+            patient    = result.observation.patient
+            patient_id = patient.get("patient_id", f"unknown_{steps_taken}")
+
+            # Stop when we've seen all patients (full cycle)
+            if patient_id in seen_patients:
+                break
+            seen_patients.add(patient_id)
+            steps_taken += 1
+
+            # Get LLM action
+            action_dict  = get_llm_action(client, task_name, patient)
+            payload_str  = json.dumps(action_dict.get("payload", {}))[:80]
+            action_label = f"{action_dict.get('action_type','?')}({payload_str})"
+
+            # Submit to environment
+            error_msg: Optional[str] = None
+            reward = 0.0
+            done   = True
+            try:
+                step_result = env.step(MedicalAction(
+                    action_type=action_dict.get("action_type", ""),
+                    payload=action_dict.get("payload", {}),
+                ))
+                reward = step_result.reward or 0.0
+                done   = step_result.done
+            except Exception as exc:
+                error_msg = str(exc)[:120]
+
+            rewards.append(reward)
+            log_step(step=steps_taken, action=action_label,
+                     reward=reward, done=done, error=error_msg)
+
+        score   = sum(rewards) / len(rewards) if rewards else 0.0
+        score   = min(max(score, 0.0), 1.0)
+        success = score >= SUCCESS_SCORE_THRESHOLD
+
+    finally:
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Healthcare Decision Support -- Baseline Runner")
-    parser.add_argument("--url", default=None,
-                        help="HF Space URL to test remotely (omit to run locally)")
-    args = parser.parse_args()
+async def main() -> None:
+    client   = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN or "hf_placeholder")
+    base_url = HF_SPACE_URL
 
     print("=" * 65, flush=True)
-    print("  Healthcare Decision Support -- Baseline Inference", flush=True)
+    print("  Healthcare Decision Support — LLM Inference", flush=True)
     print("=" * 65, flush=True)
+    print(f"  API_BASE_URL : {API_BASE_URL}", flush=True)
+    print(f"  MODEL_NAME   : {MODEL_NAME}", flush=True)
+    print(f"  HF Space URL : {base_url}", flush=True)
     print(flush=True)
 
-    if args.url:
-        result = run_remote(args.url)
-        print(json.dumps(result, indent=2), flush=True)
-    else:
-        print("Running locally against all patient cases...\n", flush=True)
-        results = run_local()
+    for task in TASKS:
+        await run_task(client, base_url, task)
+        print(flush=True)
 
-        print("=" * 65, flush=True)
-        print("  FINAL SCORES", flush=True)
-        print("=" * 65, flush=True)
-        all_scores = []
-        for task, data in results.items():
-            bar = "#" * int(data["mean"] * 30)
-            print("  {:<20}  [{:<30}]  {:.3f}  (n={})".format(
-                task, bar, data["mean"], data["n"]), flush=True)
-            all_scores.extend(data["scores"])
-        print(flush=True)
-        print("  Overall mean:  {:.3f}".format(sum(all_scores) / len(all_scores)), flush=True)
-        print(flush=True)
-        print("PASSED: Baseline script completed successfully -- no errors.", flush=True)
+
+if __name__ == "__main__":
+    asyncio.run(main())
