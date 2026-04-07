@@ -24,7 +24,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Optional
 
-from .models import MedicalAction, MedicalObservation, MedicalState
+from models import MedicalAction, MedicalObservation, MedicalState
 
 
 # ─────────────────────────────────────────────
