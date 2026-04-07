@@ -146,7 +146,11 @@ def run_local():
     for task_name, policy_fn in task_configs:
         patients = [p for p in PATIENTS if p["task"] == task_name]
         scores   = []
-        for patient in patients:
+
+        # Structured output block required by hackathon Phase 2 validator
+        print("[START] task={}".format(task_name), flush=True)
+
+        for step_idx, patient in enumerate(patients, start=1):
             env          = HealthcareEnvironment()
             env._patient = patient
             env._done    = False
@@ -155,12 +159,21 @@ def run_local():
             score        = obs.reward or 0.0
             scores.append(score)
             feedback_short = obs.feedback[:65] if obs.feedback else ""
+
+            # Required structured step output
+            print("[STEP] step={} reward={:.3f} patient={} task={}".format(
+                step_idx, score, patient["patient_id"], task_name), flush=True)
+
             print("  [{}]  patient={}  score={:.3f}  ->  {}...".format(
-                task_name, patient["patient_id"], score, feedback_short))
+                task_name, patient["patient_id"], score, feedback_short), flush=True)
 
         mean = sum(scores) / len(scores) if scores else 0.0
         results[task_name] = {"mean": round(mean, 3), "n": len(scores), "scores": scores}
-        print()
+
+        # Required structured end output
+        print("[END] task={} score={:.3f} steps={}".format(
+            task_name, mean, len(scores)), flush=True)
+        print(flush=True)
 
     return results
 
@@ -209,28 +222,28 @@ if __name__ == "__main__":
                         help="HF Space URL to test remotely (omit to run locally)")
     args = parser.parse_args()
 
-    print("=" * 65)
-    print("  Healthcare Decision Support -- Baseline Inference")
-    print("=" * 65)
-    print()
+    print("=" * 65, flush=True)
+    print("  Healthcare Decision Support -- Baseline Inference", flush=True)
+    print("=" * 65, flush=True)
+    print(flush=True)
 
     if args.url:
         result = run_remote(args.url)
-        print(json.dumps(result, indent=2))
+        print(json.dumps(result, indent=2), flush=True)
     else:
-        print("Running locally against all patient cases...\n")
+        print("Running locally against all patient cases...\n", flush=True)
         results = run_local()
 
-        print("=" * 65)
-        print("  FINAL SCORES")
-        print("=" * 65)
+        print("=" * 65, flush=True)
+        print("  FINAL SCORES", flush=True)
+        print("=" * 65, flush=True)
         all_scores = []
         for task, data in results.items():
             bar = "#" * int(data["mean"] * 30)
             print("  {:<20}  [{:<30}]  {:.3f}  (n={})".format(
-                task, bar, data["mean"], data["n"]))
+                task, bar, data["mean"], data["n"]), flush=True)
             all_scores.extend(data["scores"])
-        print()
-        print("  Overall mean:  {:.3f}".format(sum(all_scores) / len(all_scores)))
-        print()
-        print("PASSED: Baseline script completed successfully -- no errors.")
+        print(flush=True)
+        print("  Overall mean:  {:.3f}".format(sum(all_scores) / len(all_scores)), flush=True)
+        print(flush=True)
+        print("PASSED: Baseline script completed successfully -- no errors.", flush=True)
