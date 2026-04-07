@@ -36,7 +36,7 @@ MODEL_NAME       = os.getenv("MODEL_NAME",   "Qwen/Qwen2.5-72B-Instruct")
 HF_TOKEN         = os.getenv("HF_TOKEN")
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")   # optional, for from_docker_image()
 
-HF_SPACE_URL = os.getenv("HF_SPACE_URL", "https://Maibram1-Medical.hf.space")
+HF_SPACE_URL = os.getenv("HF_SPACE_URL", "https://maibram1-healthcare-decision-support-env.hf.space")
 
 TASKS                   = ["allergy_check", "dosing", "treatment_plan"]
 BENCHMARK               = "healthcare_decision_support"
